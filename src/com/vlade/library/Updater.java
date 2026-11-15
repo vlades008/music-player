@@ -35,44 +35,58 @@ public class Updater {
     static final int TIMEOUT = 12000;
 
     public static void check(String url, OnCheck cb) {
-        check(url, 0, cb);
+        new Thread(() -> {
+            String alt = mirror(url);
+            Rel best = null;
+            String err = null;
+            try {
+                best = fetch(url);
+            } catch (Exception e) {
+                err = e.getClass().getSimpleName() + ": " + e.getMessage();
+            }
+            // The two hosts cache independently and can disagree for minutes after a
+            // push. Ask both, keep the higher build - a stale copy can then never hide
+            // an update, and a blocked one never breaks the check.
+            if (alt != null) {
+                try {
+                    Rel r = fetch(alt);
+                    if (best == null || r.code > best.code) best = r;
+                } catch (Exception e) {
+                    if (err == null) err = e.getClass().getSimpleName() + ": " + e.getMessage();
+                }
+            }
+            cb.done(best, best == null ? (err == null ? "no source answered" : err) : null);
+        }).start();
     }
 
-    private static void check(String url, int attempt, OnCheck cb) {
-        new Thread(() -> {
-            HttpURLConnection c = null;
-            try {
-                c = (HttpURLConnection) new URL(url).openConnection();
-                c.setConnectTimeout(TIMEOUT);
-                c.setReadTimeout(TIMEOUT);
-                c.setRequestProperty("Cache-Control", "no-cache");
-                c.setRequestProperty("User-Agent", "LibraryShell");
-                int code = c.getResponseCode();
-                if (code != 200) { throw new java.io.IOException("HTTP " + code); }
-                StringBuilder sb = new StringBuilder();
-                try (InputStream in = new BufferedInputStream(c.getInputStream())) {
-                    byte[] buf = new byte[8192];
-                    int n;
-                    while ((n = in.read(buf)) > 0) sb.append(new String(buf, 0, n, "UTF-8"));
-                }
-                JSONObject j = new JSONObject(sb.toString());
-                Rel r = new Rel();
-                r.code = j.optInt("versionCode", 0);
-                r.name = j.optString("versionName", "");
-                r.apk = absolute(url, j.optString("apk", ""));
-                r.notes = j.optString("notes", "");
-                if (r.code <= 0) { cb.done(null, "latest.json has no versionCode"); return; }
-                cb.done(r, null);
-            } catch (Exception e) {
-                // raw.githubusercontent.com is unreachable from some networks; the same
-                // repository is mirrored by jsDelivr, so try that before giving up.
-                String alt = attempt == 0 ? mirror(url) : null;
-                if (alt != null) { check(alt, 1, cb); return; }
-                cb.done(null, e.getClass().getSimpleName() + ": " + e.getMessage());
-            } finally {
-                if (c != null) c.disconnect();
+    /** One request, one parsed release. Throws on anything that is not a usable answer. */
+    static Rel fetch(String url) throws Exception {
+        HttpURLConnection c = null;
+        try {
+            c = (HttpURLConnection) new URL(url).openConnection();
+            c.setConnectTimeout(TIMEOUT);
+            c.setReadTimeout(TIMEOUT);
+            c.setRequestProperty("Cache-Control", "no-cache");
+            c.setRequestProperty("User-Agent", "LibraryShell");
+            int code = c.getResponseCode();
+            if (code != 200) throw new java.io.IOException("HTTP " + code);
+            StringBuilder sb = new StringBuilder();
+            try (InputStream in = new BufferedInputStream(c.getInputStream())) {
+                byte[] buf = new byte[8192];
+                int n;
+                while ((n = in.read(buf)) > 0) sb.append(new String(buf, 0, n, "UTF-8"));
             }
-        }).start();
+            JSONObject j = new JSONObject(sb.toString());
+            Rel r = new Rel();
+            r.code = j.optInt("versionCode", 0);
+            r.name = j.optString("versionName", "");
+            r.apk = absolute(url, j.optString("apk", ""));
+            r.notes = j.optString("notes", "");
+            if (r.code <= 0) throw new java.io.IOException("no versionCode");
+            return r;
+        } finally {
+            if (c != null) c.disconnect();
+        }
     }
 
     /** raw.githubusercontent.com/OWNER/REPO/BRANCH/FILE -> cdn.jsdelivr.net/gh/OWNER/REPO@BRANCH/FILE */
