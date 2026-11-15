@@ -50,6 +50,11 @@ public class MainActivity extends Activity {
     static final String KEY_URL = "baseUrl";
     static final String KEY_UPDATE = "updateUrl";
     static final String DEFAULT_URL = "http://192.168.0.12:8787";
+    // Tried in order by "Find server": the name survives a new DHCP address.
+    static final String[] CANDIDATES = {
+            "http://DESKTOP-TAOGBSM.local:8787",
+            "http://192.168.0.12:8787"
+    };
     static final int LOAD_TIMEOUT_MS = 8000;
 
     WebView web;
@@ -174,11 +179,26 @@ public class MainActivity extends Activity {
                 say("Loaded in " + ms + " ms");
                 v.evaluateJavascript("document.documentElement.classList.add('in-app')", null);
                 // A page that loads but shows nothing is its own failure mode; say so
-                // instead of leaving a black rectangle.
-                v.evaluateJavascript("(document.querySelectorAll('.row')||[]).length", value -> {
+                // instead of leaving a black rectangle. A page that is not ours at all
+                // is usually a Wi-Fi login (captive portal) - name it.
+                v.evaluateJavascript("JSON.stringify({rows:(document.querySelectorAll('.row')||[]).length,title:document.title||'',host:location.host})", raw -> {
+                    String s = raw == null ? "" : raw.replace("\\\"", "\"").replaceAll("^\"|\"$", "");
                     int rows = 0;
-                    try { rows = Integer.parseInt(value.replaceAll("[^0-9]", "")); } catch (Exception ignored) {}
-                    if (rows == 0) say("Page loaded but has no tracks - is " + base + " the music server?");
+                    String title = "";
+                    String host = "";
+                    try {
+                        org.json.JSONObject o = new org.json.JSONObject(s);
+                        rows = o.optInt("rows", 0);
+                        title = o.optString("title", "");
+                        host = o.optString("host", "");
+                    } catch (Exception ignored) {}
+                    if (rows == 0) {
+                        if (!title.toLowerCase().contains("library")) {
+                            say("Loaded something that is not the library (page: \"" + title + "\", host: " + host + ") - that is usually a Wi-Fi login page.");
+                        } else {
+                            say("Page loaded but has no tracks - is " + base + " the music server?");
+                        }
+                    }
                 });
             }
         });
@@ -255,6 +275,7 @@ public class MainActivity extends Activity {
         box.addView(d);
 
         box.addView(button("Try again", v -> load()));
+        box.addView(button("Find server", v -> findServer()));
         box.addView(button("Test connection", v -> testConnection()));
         box.addView(button("Change address", v -> askAddress()));
 
@@ -267,6 +288,52 @@ public class MainActivity extends Activity {
         b.setText(label);
         b.setOnClickListener(l);
         return b;
+    }
+
+    /** The address changes when the router hands out a new lease; the name usually does not. */
+    void findServer() {
+        say("Looking for the library\u2026");
+        new Thread(() -> {
+            String[] tries = new String[CANDIDATES.length + 1];
+            tries[0] = base;
+            System.arraycopy(CANDIDATES, 0, tries, 1, CANDIDATES.length);
+            String found = null;
+            String report = "";
+            for (String u : tries) {
+                HttpURLConnection c = null;
+                try {
+                    c = (HttpURLConnection) new URL(u + "/api/health").openConnection();
+                    c.setConnectTimeout(3000);
+                    c.setReadTimeout(3000);
+                    int code = c.getResponseCode();
+                    report += u + " \u2192 HTTP " + code + "\n";
+                    if (code == 200) { found = u; break; }
+                } catch (Exception e) {
+                    report += u + " \u2192 " + e.getClass().getSimpleName() + "\n";
+                } finally {
+                    if (c != null) c.disconnect();
+                }
+            }
+            final String hit = found;
+            final String log = report;
+            runOnUiThread(() -> {
+                if (hit != null) {
+                    base = hit;
+                    getSharedPreferences(PREFS, MODE_PRIVATE).edit().putString(KEY_URL, base).apply();
+                    toast("Found " + base);
+                    load();
+                } else {
+                    say("No server answered");
+                    new AlertDialog.Builder(MainActivity.this)
+                            .setTitle("Nothing answered")
+                            .setMessage("Tried:\n" + log
+                                    + "\nThe phone has to be on the same Wi-Fi as the machine. If it is on another "
+                                    + "network (or a phone-data hotspot), no address will work.")
+                            .setPositiveButton("OK", null)
+                            .show();
+                }
+            });
+        }).start();
     }
 
     /** Tells apart "no route to the machine" from "the machine answered but not with the app". */

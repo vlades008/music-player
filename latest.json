@@ -1,7 +1,7 @@
 {
-    "versionCode":  8,
-    "versionName":  "1.7",
+    "versionCode":  9,
+    "versionName":  "1.8",
     "apk":  "Library.apk",
-    "notes":  "a startup failure prints itself instead of going black",
-    "built":  "2026-11-15 13:20"
+    "notes":  "accuses a Wi-Fi login page by name, Find server tries the machine name",
+    "built":  "2026-11-15 14:28"
 }
