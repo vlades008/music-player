@@ -35,6 +35,10 @@ public class Updater {
     static final int TIMEOUT = 12000;
 
     public static void check(String url, OnCheck cb) {
+        check(url, 0, cb);
+    }
+
+    private static void check(String url, int attempt, OnCheck cb) {
         new Thread(() -> {
             HttpURLConnection c = null;
             try {
@@ -44,7 +48,7 @@ public class Updater {
                 c.setRequestProperty("Cache-Control", "no-cache");
                 c.setRequestProperty("User-Agent", "LibraryShell");
                 int code = c.getResponseCode();
-                if (code != 200) { cb.done(null, "HTTP " + code); return; }
+                if (code != 200) { throw new java.io.IOException("HTTP " + code); }
                 StringBuilder sb = new StringBuilder();
                 try (InputStream in = new BufferedInputStream(c.getInputStream())) {
                     byte[] buf = new byte[8192];
@@ -60,11 +64,24 @@ public class Updater {
                 if (r.code <= 0) { cb.done(null, "latest.json has no versionCode"); return; }
                 cb.done(r, null);
             } catch (Exception e) {
+                // raw.githubusercontent.com is unreachable from some networks; the same
+                // repository is mirrored by jsDelivr, so try that before giving up.
+                String alt = attempt == 0 ? mirror(url) : null;
+                if (alt != null) { check(alt, 1, cb); return; }
                 cb.done(null, e.getClass().getSimpleName() + ": " + e.getMessage());
             } finally {
                 if (c != null) c.disconnect();
             }
         }).start();
+    }
+
+    /** raw.githubusercontent.com/OWNER/REPO/BRANCH/FILE -> cdn.jsdelivr.net/gh/OWNER/REPO@BRANCH/FILE */
+    static String mirror(String url) {
+        java.util.regex.Matcher m = java.util.regex.Pattern
+                .compile("^https?://raw\\.githubusercontent\\.com/([^/]+)/([^/]+)/([^/]+)/(.+)$")
+                .matcher(url);
+        if (!m.matches()) return null;
+        return "https://cdn.jsdelivr.net/gh/" + m.group(1) + "/" + m.group(2) + "@" + m.group(3) + "/" + m.group(4);
     }
 
     public static void download(Context ctx, Rel rel, OnDownload cb) {
