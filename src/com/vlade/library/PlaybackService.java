@@ -73,6 +73,9 @@ public class PlaybackService extends Service {
             return START_NOT_STICKY;
         }
         if (title == null || title.isEmpty()) {
+            // A service started with startForegroundService must call startForeground
+            // before it stops, or Android kills the process for being late.
+            startForeground(ID, placeholder());
             stopSelf();
             return START_NOT_STICKY;
         }
@@ -81,6 +84,15 @@ public class PlaybackService extends Service {
         if (playing && !lock.isHeld()) lock.acquire(6 * 60 * 60 * 1000L);
         if (!playing && lock.isHeld()) lock.release();
         return START_STICKY;
+    }
+
+    Notification placeholder() {
+        return new Notification.Builder(this, CHANNEL)
+                .setSmallIcon(R.drawable.ic_launcher_foreground)
+                .setContentTitle("Library")
+                .setContentText("Stopped")
+                .setOngoing(false)
+                .build();
     }
 
     Notification build() {
@@ -100,10 +112,14 @@ public class PlaybackService extends Service {
                 .setOngoing(playing)
                 .setOnlyAlertOnce(true)
                 .setShowWhen(false)
-                .addAction(new Notification.Action.Builder(null, playing ? "Pause" : "Play", toggle).build())
-                .addAction(new Notification.Action.Builder(null, "Next", next).build());
+                .addAction(new Notification.Action.Builder(toggleIcon(), playing ? "Pause" : "Play", toggle).build())
+                .addAction(new Notification.Action.Builder(toggleIcon(), "Next", next).build());
         if (playing) b.setStyle(new Notification.BigTextStyle().bigText(artist));
         return b.build();
+    }
+
+    android.graphics.drawable.Icon toggleIcon() {
+        return android.graphics.drawable.Icon.createWithResource(this, R.drawable.ic_launcher_foreground);
     }
 
     @Override
