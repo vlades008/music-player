@@ -18,6 +18,7 @@ if ($LASTEXITCODE) { throw 'build failed' }
 
 Copy-Item (Join-Path $android 'out\Library.apk')  $repo -Force
 Copy-Item (Join-Path $android 'out\latest.json')  $repo -Force
+if (Test-Path (Join-Path $repo 'src')) { Remove-Item (Join-Path $repo 'src') -Recurse -Force }
 Copy-Item (Join-Path $android 'src') (Join-Path $repo 'src') -Recurse -Force
 Copy-Item (Join-Path $android 'build-apk.ps1') $repo -Force
 
