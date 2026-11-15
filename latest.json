@@ -1,7 +1,7 @@
 {
-    "versionCode":  10,
-    "versionName":  "1.9",
+    "versionCode":  11,
+    "versionName":  "2.0",
     "apk":  "Library.apk",
-    "notes":  "server list with failover, honest page-never-arrived message",
-    "built":  "2026-11-15 14:35"
+    "notes":  "token-protected servers (for the NAS over HTTPS), address list",
+    "built":  "2026-11-15 14:42"
 }

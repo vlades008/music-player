@@ -62,6 +62,7 @@ public class MainActivity extends Activity {
     String base;
     Updater.Rel pendingUpdate;
     String lastError = "";
+    String token = "";
     long loadStarted = 0;
     boolean pageFinished = false;
     final Handler ui = new Handler(Looper.getMainLooper());
@@ -72,6 +73,7 @@ public class MainActivity extends Activity {
         installCrashLog();
         SharedPreferences p = getSharedPreferences(PREFS, MODE_PRIVATE);
         base = p.getString(KEY_URL, DEFAULT_URL);
+        token = p.getString("token", "");
 
         root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
@@ -204,7 +206,7 @@ public class MainActivity extends Activity {
             }
         });
         stage.addView(web, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
-        web.loadUrl(base);
+        web.loadUrl(base, authHeader());
         addMenuButton();
 
         ui.postDelayed(() -> {
@@ -311,13 +313,32 @@ public class MainActivity extends Activity {
 
     void saveServers(java.util.List<String> list) {
         JSONArray a = new JSONArray();
-        for (String s : list) if (s != null && !s.trim().isEmpty()) a.put(s.trim().replaceAll("/+$", ""));
+        for (String s : list) if (s != null && !s.trim().isEmpty()) a.put(takeToken(s.trim().replaceAll("/+$", "")));
         String json = a.toString();
         getSharedPreferences(PREFS, MODE_PRIVATE).edit()
                 .putString("servers", json)
-                .putString(KEY_URL, list.isEmpty() ? DEFAULT_URL : list.get(0).trim())
+                .putString(KEY_URL, list.isEmpty() ? DEFAULT_URL : takeToken(list.get(0).trim()))
                 .apply();
-        base = list.isEmpty() ? DEFAULT_URL : list.get(0).trim();
+        base = list.isEmpty() ? DEFAULT_URL : takeToken(list.get(0).trim());
+    }
+
+    /** "https://host/?t=SECRET" keeps the secret out of the visible address. */
+    String takeToken(String url) {
+        int q = url.indexOf("?t=");
+        if (q < 0) return url;
+        String t = url.substring(q + 3);
+        int amp = t.indexOf('&');
+        if (amp >= 0) t = t.substring(0, amp);
+        token = t;
+        getSharedPreferences(PREFS, MODE_PRIVATE).edit().putString("token", token).apply();
+        return url.substring(0, q);
+    }
+
+    java.util.Map<String, String> authHeader() {
+        if (token == null || token.isEmpty()) return null;
+        java.util.Map<String, String> h = new java.util.HashMap<>();
+        h.put("X-Library-Token", token);
+        return h;
     }
 
     /** Probes every address in order and loads the first one that answers as the library. */
@@ -333,6 +354,7 @@ public class MainActivity extends Activity {
                     c = (HttpURLConnection) new URL(u + "/api/health").openConnection();
                     c.setConnectTimeout(1600);
                     c.setReadTimeout(1600);
+                    if (!token.isEmpty()) c.setRequestProperty("X-Library-Token", token);
                     if (c.getResponseCode() == 200) {
                         StringBuilder sb = new StringBuilder();
                         try (InputStream in = c.getInputStream()) {
@@ -433,6 +455,7 @@ public class MainActivity extends Activity {
                 c = (HttpURLConnection) new URL(url).openConnection();
                 c.setConnectTimeout(5000);
                 c.setReadTimeout(5000);
+                if (!token.isEmpty()) c.setRequestProperty("X-Library-Token", token);
                 int code = c.getResponseCode();
                 StringBuilder sb = new StringBuilder();
                 try (InputStream in = c.getInputStream()) {
