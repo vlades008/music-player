@@ -101,7 +101,27 @@ public class MainActivity extends Activity {
         PlaybackService.onNext = () -> runJs("if(window.playerNext)window.playerNext()");
 
         askNotifications();
-        load();
+        try { load(); } catch (Throwable e) { showFatal(e); }
+    }
+
+    /** Anything that throws before the page exists becomes readable text, not black. */
+    void showFatal(Throwable e) {
+        try {
+            java.io.StringWriter sw = new java.io.StringWriter();
+            e.printStackTrace(new java.io.PrintWriter(sw));
+            String trace = sw.toString();
+            say("Startup failed: " + e);
+            stage.removeAllViews();
+            android.widget.ScrollView sc = new android.widget.ScrollView(this);
+            TextView t = new TextView(this);
+            t.setText("The app failed to start.\n\n" + (trace.length() > 4000 ? trace.substring(0, 4000) : trace));
+            t.setTextColor(Color.parseColor("#ff9a9a"));
+            t.setTextSize(12);
+            t.setPadding(dp(16), dp(16), dp(16), dp(16));
+            sc.addView(t);
+            stage.addView(sc);
+            addMenuButton();
+        } catch (Throwable ignored) {}
     }
 
     // ---- the page -----------------------------------------------------------
