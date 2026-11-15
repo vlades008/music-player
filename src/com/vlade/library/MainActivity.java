@@ -30,6 +30,8 @@ import android.widget.LinearLayout;
 import android.widget.TextView;
 import android.widget.Toast;
 
+import org.json.JSONArray;
+
 import java.io.InputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
@@ -50,11 +52,6 @@ public class MainActivity extends Activity {
     static final String KEY_URL = "baseUrl";
     static final String KEY_UPDATE = "updateUrl";
     static final String DEFAULT_URL = "http://192.168.0.12:8787";
-    // Tried in order by "Find server": the name survives a new DHCP address.
-    static final String[] CANDIDATES = {
-            "http://DESKTOP-TAOGBSM.local:8787",
-            "http://192.168.0.12:8787"
-    };
     static final int LOAD_TIMEOUT_MS = 8000;
 
     WebView web;
@@ -106,7 +103,7 @@ public class MainActivity extends Activity {
         PlaybackService.onNext = () -> runJs("if(window.playerNext)window.playerNext()");
 
         askNotifications();
-        try { load(); } catch (Throwable e) { showFatal(e); }
+        try { connect(); } catch (Throwable e) { showFatal(e); }
     }
 
     /** Anything that throws before the page exists becomes readable text, not black. */
@@ -181,20 +178,24 @@ public class MainActivity extends Activity {
                 // A page that loads but shows nothing is its own failure mode; say so
                 // instead of leaving a black rectangle. A page that is not ours at all
                 // is usually a Wi-Fi login (captive portal) - name it.
-                v.evaluateJavascript("JSON.stringify({rows:(document.querySelectorAll('.row')||[]).length,title:document.title||'',host:location.host})", raw -> {
+                v.evaluateJavascript("JSON.stringify({rows:(document.querySelectorAll('.row')||[]).length,title:document.title||'',host:location.host,proto:location.protocol})", raw -> {
                     String s = raw == null ? "" : raw.replace("\\\"", "\"").replaceAll("^\"|\"$", "");
                     int rows = 0;
                     String title = "";
                     String host = "";
+                    String proto = "";
                     try {
                         org.json.JSONObject o = new org.json.JSONObject(s);
                         rows = o.optInt("rows", 0);
                         title = o.optString("title", "");
                         host = o.optString("host", "");
+                        proto = o.optString("proto", "");
                     } catch (Exception ignored) {}
                     if (rows == 0) {
-                        if (!title.toLowerCase().contains("library")) {
-                            say("Loaded something that is not the library (page: \"" + title + "\", host: " + host + ") - that is usually a Wi-Fi login page.");
+                        if (!proto.startsWith("http")) {
+                            say("The page never arrived (" + lastError + ") - nothing was served at " + base);
+                        } else if (!title.toLowerCase().contains("library")) {
+                            say("Something answered, but it is not the library (page: \"" + title + "\", host: " + host + ") - usually a Wi-Fi login page.");
                         } else {
                             say("Page loaded but has no tracks - is " + base + " the music server?");
                         }
@@ -274,10 +275,9 @@ public class MainActivity extends Activity {
         d.setPadding(0, dp(12), 0, dp(20));
         box.addView(d);
 
-        box.addView(button("Try again", v -> load()));
-        box.addView(button("Find server", v -> findServer()));
+        box.addView(button("Try again", v -> connect()));
         box.addView(button("Test connection", v -> testConnection()));
-        box.addView(button("Change address", v -> askAddress()));
+        box.addView(button("Servers\u2026", v -> askServers()));
 
         stage.addView(box);
         addMenuButton();
@@ -290,50 +290,135 @@ public class MainActivity extends Activity {
         return b;
     }
 
-    /** The address changes when the router hands out a new lease; the name usually does not. */
-    void findServer() {
-        say("Looking for the library\u2026");
+    // ---- server addresses ---------------------------------------------------
+    // One list, tried in order. At home the LAN address answers first; on mobile
+    // data the VPN address does. The first one that answers /api/health wins and
+    // becomes the current base, so nothing has to be switched by hand.
+
+    java.util.List<String> servers() {
+        java.util.List<String> out = new java.util.ArrayList<>();
+        String raw = getSharedPreferences(PREFS, MODE_PRIVATE).getString("servers", "");
+        try {
+            JSONArray a = new JSONArray(raw);
+            for (int i = 0; i < a.length(); i++) {
+                String u = a.optString(i, "").trim();
+                if (!u.isEmpty()) out.add(u);
+            }
+        } catch (Exception ignored) {}
+        if (out.isEmpty()) out.add(getSharedPreferences(PREFS, MODE_PRIVATE).getString(KEY_URL, DEFAULT_URL));
+        return out;
+    }
+
+    void saveServers(java.util.List<String> list) {
+        JSONArray a = new JSONArray();
+        for (String s : list) if (s != null && !s.trim().isEmpty()) a.put(s.trim().replaceAll("/+$", ""));
+        String json = a.toString();
+        getSharedPreferences(PREFS, MODE_PRIVATE).edit()
+                .putString("servers", json)
+                .putString(KEY_URL, list.isEmpty() ? DEFAULT_URL : list.get(0).trim())
+                .apply();
+        base = list.isEmpty() ? DEFAULT_URL : list.get(0).trim();
+    }
+
+    /** Probes every address in order and loads the first one that answers as the library. */
+    void connect() {
+        final java.util.List<String> list = servers();
+        say("Connecting to " + list.get(0) + "\u2026");
         new Thread(() -> {
-            String[] tries = new String[CANDIDATES.length + 1];
-            tries[0] = base;
-            System.arraycopy(CANDIDATES, 0, tries, 1, CANDIDATES.length);
-            String found = null;
-            String report = "";
-            for (String u : tries) {
+            String winner = null;
+            StringBuilder log = new StringBuilder();
+            for (String u : list) {
                 HttpURLConnection c = null;
                 try {
                     c = (HttpURLConnection) new URL(u + "/api/health").openConnection();
-                    c.setConnectTimeout(3000);
-                    c.setReadTimeout(3000);
-                    int code = c.getResponseCode();
-                    report += u + " \u2192 HTTP " + code + "\n";
-                    if (code == 200) { found = u; break; }
+                    c.setConnectTimeout(1600);
+                    c.setReadTimeout(1600);
+                    if (c.getResponseCode() == 200) {
+                        StringBuilder sb = new StringBuilder();
+                        try (InputStream in = c.getInputStream()) {
+                            byte[] buf = new byte[1024];
+                            int n = in.read(buf);
+                            if (n > 0) sb.append(new String(buf, 0, n, "UTF-8"));
+                        }
+                        if (sb.toString().contains("\"ok\":true")) {
+                            log.append(u).append(" \u2192 ok\n");
+                            winner = u;
+                            break;
+                        }
+                        log.append(u).append(" \u2192 answered, but not the library\n");
+                    } else {
+                        log.append(u).append(" \u2192 HTTP ").append(c.getResponseCode()).append("\n");
+                    }
                 } catch (Exception e) {
-                    report += u + " \u2192 " + e.getClass().getSimpleName() + "\n";
+                    log.append(u).append(" \u2192 ").append(e.getClass().getSimpleName()).append("\n");
                 } finally {
                     if (c != null) c.disconnect();
                 }
             }
-            final String hit = found;
-            final String log = report;
+            final String hit = winner;
+            final String tried = log.toString();
             runOnUiThread(() -> {
                 if (hit != null) {
-                    base = hit;
-                    getSharedPreferences(PREFS, MODE_PRIVATE).edit().putString(KEY_URL, base).apply();
-                    toast("Found " + base);
+                    java.util.List<String> reordered = new java.util.ArrayList<>();
+                    reordered.add(hit);
+                    for (String s : list) if (!s.equals(hit)) reordered.add(s);
+                    saveServers(reordered);
                     load();
                 } else {
-                    say("No server answered");
-                    new AlertDialog.Builder(MainActivity.this)
-                            .setTitle("Nothing answered")
-                            .setMessage("Tried:\n" + log
-                                    + "\nThe phone has to be on the same Wi-Fi as the machine. If it is on another "
-                                    + "network (or a phone-data hotspot), no address will work.")
-                            .setPositiveButton("OK", null)
-                            .show();
+                    say("No address answered");
+                    showUnreachable("nothing answered:\n" + tried.trim());
                 }
             });
         }).start();
+    }
+
+    /** The address changes when the router hands out a new lease; the list keeps the old ones. */
+    void askServers() {
+        final java.util.List<String> list = servers();
+        String[] labels = new String[list.size() + 1];
+        for (int i = 0; i < list.size(); i++) {
+            labels[i] = (i == 0 ? "\u2713 " : "   ") + list.get(i);
+        }
+        labels[list.size()] = "+ Add an address";
+        new AlertDialog.Builder(this)
+                .setTitle("Servers, tried in order")
+                .setItems(labels, (d, i) -> {
+                    if (i == list.size()) { addAddress(list); return; }
+                    java.util.List<String> moved = new java.util.ArrayList<>();
+                    moved.add(list.get(i));
+                    for (String s : list) if (!s.equals(list.get(i))) moved.add(s);
+                    saveServers(moved);
+                    connect();
+                })
+                .setNeutralButton("Remove all but the first", (d, w) -> {
+                    java.util.List<String> one = new java.util.ArrayList<>();
+                    one.add(list.get(0));
+                    saveServers(one);
+                    connect();
+                })
+                .setNegativeButton("Cancel", null)
+                .show();
+    }
+
+    void addAddress(java.util.List<String> list) {
+        EditText e = new EditText(this);
+        e.setInputType(InputType.TYPE_TEXT_VARIATION_URI);
+        e.setHint("http://100.x.y.z:8787  or  http://name.tailnet.ts.net");
+        new AlertDialog.Builder(this)
+                .setTitle("Add a server")
+                .setMessage("Home Wi-Fi, a VPN address, a machine name - any address that answers /api/health. The list is tried in order.")
+                .setView(e)
+                .setPositiveButton("Add", (d, w) -> {
+                    String v = e.getText().toString().trim();
+                    if (v.isEmpty()) return;
+                    if (!v.startsWith("http://") && !v.startsWith("https://")) v = "http://" + v;
+                    java.util.List<String> next = new java.util.ArrayList<>(list);
+                    next.add(v.replaceAll("/+$", ""));
+                    saveServers(next);
+                    connect();
+                })
+                .setNegativeButton("Cancel", null)
+                .show();
     }
 
     /** Tells apart "no route to the machine" from "the machine answered but not with the app". */
@@ -387,9 +472,11 @@ public class MainActivity extends Activity {
                     String v = e.getText().toString().trim();
                     if (v.isEmpty()) return;
                     if (!v.startsWith("http://") && !v.startsWith("https://")) v = "http://" + v;
-                    base = v.replaceAll("/+$", "");
-                    getSharedPreferences(PREFS, MODE_PRIVATE).edit().putString(KEY_URL, base).apply();
-                    load();
+                    java.util.List<String> next = servers();
+                    next.remove(base);
+                    next.add(0, v.replaceAll("/+$", ""));
+                    saveServers(next);
+                    connect();
                 })
                 .setNegativeButton("Cancel", null)
                 .show();
@@ -411,11 +498,11 @@ public class MainActivity extends Activity {
     }
 
     void showMenu() {
-        String[] items = { "Reload", "Server address", "Test connection", "Check for updates", "Diagnostics" };
+        String[] items = { "Reload", "Servers\u2026", "Test connection", "Check for updates", "Diagnostics" };
         new AlertDialog.Builder(this)
                 .setItems(items, (d, i) -> {
-                    if (i == 0) load();
-                    else if (i == 1) askAddress();
+                    if (i == 0) connect();
+                    else if (i == 1) askServers();
                     else if (i == 2) testConnection();
                     else if (i == 3) checkUpdates(true);
                     else diagnostics();
@@ -430,6 +517,7 @@ public class MainActivity extends Activity {
                 + "Android     " + Build.VERSION.RELEASE + " / API " + Build.VERSION.SDK_INT + "\n"
                 + "Device      " + Build.MANUFACTURER + " " + Build.MODEL + "\n"
                 + "Server      " + base + "\n"
+                + "Also try    " + servers().subList(Math.min(1, servers().size()), servers().size()) + "\n"
                 + "Last load   " + (lastError.isEmpty() ? "ok" : lastError) + "\n"
                 + "Update from " + (upd == null || upd.isEmpty() ? "not set" : upd)
                 + (crashTail().isEmpty() ? "" : "\n\nLast crash:\n" + crashTail());
