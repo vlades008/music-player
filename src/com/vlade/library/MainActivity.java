@@ -67,6 +67,7 @@ public class MainActivity extends Activity {
     @Override
     protected void onCreate(Bundle b) {
         super.onCreate(b);
+        installCrashLog();
         SharedPreferences p = getSharedPreferences(PREFS, MODE_PRIVATE);
         base = p.getString(KEY_URL, DEFAULT_URL);
 
@@ -173,6 +174,33 @@ public class MainActivity extends Activity {
         }, LOAD_TIMEOUT_MS);
 
         checkUpdates(false);
+    }
+
+    /** A crash on the phone is unreadable without adb; put it in a file the app can show. */
+    void installCrashLog() {
+        final Thread.UncaughtExceptionHandler prev = Thread.getDefaultUncaughtExceptionHandler();
+        Thread.setDefaultUncaughtExceptionHandler((t, e) -> {
+            try {
+                java.io.File f = new java.io.File(getExternalFilesDir(null), "crash.txt");
+                java.io.PrintWriter w = new java.io.PrintWriter(f);
+                w.println(new java.util.Date().toString());
+                e.printStackTrace(w);
+                w.close();
+            } catch (Exception ignored) {}
+            if (prev != null) prev.uncaughtException(t, e);
+        });
+    }
+
+    String crashTail() {
+        try {
+            java.io.File f = new java.io.File(getExternalFilesDir(null), "crash.txt");
+            if (!f.exists()) return "";
+            String all = new String(java.nio.file.Files.readAllBytes(f.toPath()), "UTF-8");
+            String[] lines = all.split("\n");
+            StringBuilder sb = new StringBuilder();
+            for (int i = 0; i < Math.min(8, lines.length); i++) sb.append(lines[i]).append("\n");
+            return sb.toString();
+        } catch (Exception e) { return ""; }
     }
 
     void say(String s) {
@@ -316,7 +344,8 @@ public class MainActivity extends Activity {
                 + "Device      " + Build.MANUFACTURER + " " + Build.MODEL + "\n"
                 + "Server      " + base + "\n"
                 + "Last load   " + (lastError.isEmpty() ? "ok" : lastError) + "\n"
-                + "Update from " + (upd == null || upd.isEmpty() ? "not set" : upd);
+                + "Update from " + (upd == null || upd.isEmpty() ? "not set" : upd)
+                + (crashTail().isEmpty() ? "" : "\n\nLast crash:\n" + crashTail());
         new AlertDialog.Builder(this)
                 .setTitle("Diagnostics")
                 .setMessage(msg)
