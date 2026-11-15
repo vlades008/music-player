@@ -81,5 +81,6 @@ $latest = [ordered]@{
 [System.IO.File]::WriteAllText((Join-Path $out 'latest.json'),
   ($latest | ConvertTo-Json), (New-Object System.Text.UTF8Encoding($false)))
 
-& "$bt\apksigner.bat" verify --print-certs $apk | Select-Object -First 2
-Get-Item $apk | Select-Object Name, @{n = 'MB'; e = { [math]::Round($_.Length / 1MB, 1) } }, LastWriteTime
+& "$bt\apksigner.bat" verify --print-certs $apk | Out-String | ForEach-Object { ($_ -split "`n" | Select-Object -First 2) -join "`n" }
+Get-Item $apk | Select-Object Name, @{n = 'MB'; e = { [math]::Round($_.Length / 1MB, 1) } }, @{n = 'Bytes'; e = { $_.Length } }, LastWriteTime
+exit 0
