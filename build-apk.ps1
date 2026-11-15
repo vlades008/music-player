@@ -67,7 +67,9 @@ if (-not (Test-Path $ks)) {
 }
 $apk = Join-Path $out 'Library.apk'
 & "$bt\apksigner.bat" sign --ks $ks --ks-key-alias library --ks-pass pass:library2026 `
-  --key-pass pass:library2026 --out $apk "$work\aligned.apk"
+  --key-pass pass:library2026 `
+  --v1-signing-enabled true --v2-signing-enabled true --v3-signing-enabled true `
+  --out $apk "$work\aligned.apk"
 if ($LASTEXITCODE) { throw 'apksigner failed' }
 
 # What the app reads to notice an update.

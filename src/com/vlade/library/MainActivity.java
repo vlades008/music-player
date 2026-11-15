@@ -5,10 +5,11 @@ import android.app.AlertDialog;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.graphics.Color;
-import android.graphics.drawable.GradientDrawable;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
 import android.text.InputType;
 import android.util.TypedValue;
 import android.view.Gravity;
@@ -16,6 +17,9 @@ import android.view.View;
 import android.view.ViewGroup;
 import android.webkit.JavascriptInterface;
 import android.webkit.WebChromeClient;
+import android.webkit.WebResourceError;
+import android.webkit.WebResourceRequest;
+import android.webkit.WebResourceResponse;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
@@ -26,29 +30,39 @@ import android.widget.LinearLayout;
 import android.widget.TextView;
 import android.widget.Toast;
 
+import java.io.InputStream;
+import java.net.HttpURLConnection;
+import java.net.URL;
+
 /**
  * The phone half of the music library.
  *
- * The app is a container, not the app: everything you see is the page served by
- * the machine at home, so a change to the player arrives without an install.
- * The container only has to do four things Android alone can do - keep playing
- * when the screen is off, put the track on a notification, remember the server
- * address, and notice when a new build of the container itself exists.
+ * A container, not the app: everything you see comes from the page served at
+ * home, so a change to the player arrives without an install. The container
+ * does what Android alone can do - keep playing with the screen off, put the
+ * track on a notification, remember the address, notice a new build of itself -
+ * and, since a black screen tells nobody anything, it reports every step of a
+ * load on screen instead of failing silently.
  */
 public class MainActivity extends Activity {
 
     static final String PREFS = "cfg";
     static final String KEY_URL = "baseUrl";
     static final String KEY_UPDATE = "updateUrl";
-    static final String KEY_SEEN = "seenVersion";
     static final String DEFAULT_URL = "http://192.168.0.12:8787";
+    static final int LOAD_TIMEOUT_MS = 8000;
 
     WebView web;
     LinearLayout root;
     FrameLayout stage;
     TextView banner;
+    TextView status;
     String base;
     Updater.Rel pendingUpdate;
+    String lastError = "";
+    long loadStarted = 0;
+    boolean pageFinished = false;
+    final Handler ui = new Handler(Looper.getMainLooper());
 
     @Override
     protected void onCreate(Bundle b) {
@@ -69,6 +83,14 @@ public class MainActivity extends Activity {
         banner.setOnClickListener(v -> install(pendingUpdate));
         root.addView(banner);
 
+        status = new TextView(this);
+        status.setBackgroundColor(Color.parseColor("#1a1a20"));
+        status.setTextColor(Color.parseColor("#b9b9c6"));
+        status.setTextSize(12);
+        status.setPadding(dp(16), dp(8), dp(16), dp(8));
+        status.setText("Starting\u2026");
+        root.addView(status);
+
         stage = new FrameLayout(this);
         root.addView(stage, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
 
@@ -84,7 +106,13 @@ public class MainActivity extends Activity {
     // ---- the page -----------------------------------------------------------
 
     void load() {
+        ui.removeCallbacksAndMessages(null);
         stage.removeAllViews();
+        pageFinished = false;
+        lastError = "";
+        loadStarted = System.currentTimeMillis();
+        say("Connecting to " + base + "\u2026");
+
         web = new WebView(this);
         WebSettings s = web.getSettings();
         s.setJavaScriptEnabled(true);
@@ -97,7 +125,7 @@ public class MainActivity extends Activity {
         web.addJavascriptInterface(new Bridge(), "Android");
         web.setWebViewClient(new WebViewClient() {
             @Override
-            public boolean shouldOverrideUrlLoading(WebView v, android.webkit.WebResourceRequest r) {
+            public boolean shouldOverrideUrlLoading(WebView v, WebResourceRequest r) {
                 Uri u = r.getUrl();
                 if (u.getHost() != null && u.getHost().equals(Uri.parse(base).getHost())) return false;
                 try { startActivity(new Intent(Intent.ACTION_VIEW, u)); } catch (Exception ignored) {}
@@ -105,28 +133,62 @@ public class MainActivity extends Activity {
             }
 
             @Override
-            public void onReceivedError(WebView v, android.webkit.WebResourceRequest r, android.webkit.WebResourceError e) {
-                if (r.isForMainFrame()) showUnreachable();
+            public void onReceivedError(WebView v, WebResourceRequest r, WebResourceError e) {
+                if (!r.isForMainFrame()) return;
+                lastError = "network: " + e.getDescription() + " (" + e.getErrorCode() + ")";
+                showUnreachable(lastError);
+            }
+
+            @Override
+            public void onReceivedHttpError(WebView v, WebResourceRequest r, WebResourceResponse e) {
+                if (!r.isForMainFrame()) return;
+                lastError = "HTTP " + e.getStatusCode() + " from " + r.getUrl().getPath();
+                showUnreachable(lastError);
             }
 
             @Override
             public void onPageFinished(WebView v, String url) {
-                // Handy for the page: it can hide its own chrome when it runs inside the app.
+                pageFinished = true;
+                long ms = System.currentTimeMillis() - loadStarted;
+                say("Loaded in " + ms + " ms");
                 v.evaluateJavascript("document.documentElement.classList.add('in-app')", null);
+                // A page that loads but shows nothing is its own failure mode; say so
+                // instead of leaving a black rectangle.
+                v.evaluateJavascript("(document.querySelectorAll('.row')||[]).length", value -> {
+                    int rows = 0;
+                    try { rows = Integer.parseInt(value.replaceAll("[^0-9]", "")); } catch (Exception ignored) {}
+                    if (rows == 0) say("Page loaded but has no tracks - is " + base + " the music server?");
+                });
             }
         });
         stage.addView(web, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
         web.loadUrl(base);
         addMenuButton();
+
+        ui.postDelayed(() -> {
+            if (!pageFinished) {
+                lastError = "no answer in " + (LOAD_TIMEOUT_MS / 1000) + " s";
+                showUnreachable(lastError);
+            }
+        }, LOAD_TIMEOUT_MS);
+
         checkUpdates(false);
     }
 
-    void showUnreachable() {
+    void say(String s) {
+        status.setText(s);
+        status.setVisibility(View.VISIBLE);
+    }
+
+    void showUnreachable(String reason) {
+        ui.removeCallbacksAndMessages(null);
         stage.removeAllViews();
+        say("Not connected");
+
         LinearLayout box = new LinearLayout(this);
         box.setOrientation(LinearLayout.VERTICAL);
         box.setGravity(Gravity.CENTER);
-        box.setPadding(dp(28), dp(28), dp(28), dp(28));
+        box.setPadding(dp(26), dp(20), dp(26), dp(20));
 
         TextView t = new TextView(this);
         t.setText("Can't reach the library");
@@ -136,25 +198,66 @@ public class MainActivity extends Activity {
         box.addView(t);
 
         TextView d = new TextView(this);
-        d.setText(base + "\n\nThe machine has to be awake and on the same Wi-Fi. If the address changed, set it again.");
+        d.setText(base + "\n\n" + reason
+                + "\n\nThe machine has to be awake and on the same Wi-Fi. If its address changed, set it again.");
         d.setTextColor(Color.parseColor("#9a9aa4"));
         d.setTextSize(14);
         d.setGravity(Gravity.CENTER);
-        d.setPadding(0, dp(12), 0, dp(22));
+        d.setPadding(0, dp(12), 0, dp(20));
         box.addView(d);
 
-        Button retry = new Button(this);
-        retry.setText("Try again");
-        retry.setOnClickListener(v -> load());
-        box.addView(retry);
-
-        Button addr = new Button(this);
-        addr.setText("Change address");
-        addr.setOnClickListener(v -> askAddress());
-        box.addView(addr);
+        box.addView(button("Try again", v -> load()));
+        box.addView(button("Test connection", v -> testConnection()));
+        box.addView(button("Change address", v -> askAddress()));
 
         stage.addView(box);
         addMenuButton();
+    }
+
+    Button button(String label, View.OnClickListener l) {
+        Button b = new Button(this);
+        b.setText(label);
+        b.setOnClickListener(l);
+        return b;
+    }
+
+    /** Tells apart "no route to the machine" from "the machine answered but not with the app". */
+    void testConnection() {
+        say("Testing " + base + "\u2026");
+        final String url = base + "/api/health";
+        new Thread(() -> {
+            String result;
+            HttpURLConnection c = null;
+            try {
+                long t0 = System.currentTimeMillis();
+                c = (HttpURLConnection) new URL(url).openConnection();
+                c.setConnectTimeout(5000);
+                c.setReadTimeout(5000);
+                int code = c.getResponseCode();
+                StringBuilder sb = new StringBuilder();
+                try (InputStream in = c.getInputStream()) {
+                    byte[] buf = new byte[2048];
+                    int n = in.read(buf);
+                    if (n > 0) sb.append(new String(buf, 0, n, "UTF-8"));
+                }
+                result = "HTTP " + code + " in " + (System.currentTimeMillis() - t0) + " ms\n\n" + sb;
+            } catch (Exception e) {
+                result = e.getClass().getSimpleName() + ": " + e.getMessage()
+                        + "\n\nNothing answered. The usual causes: the machine asleep, a VPN on it, "
+                        + "or this phone on mobile data instead of the home Wi-Fi.";
+            } finally {
+                if (c != null) c.disconnect();
+            }
+            final String shown = result;
+            runOnUiThread(() -> {
+                say("Test done");
+                new AlertDialog.Builder(MainActivity.this)
+                        .setTitle("Connection test")
+                        .setMessage(url + "\n\n" + shown)
+                        .setPositiveButton("OK", null)
+                        .show();
+            });
+        }).start();
     }
 
     void askAddress() {
@@ -185,34 +288,44 @@ public class MainActivity extends Activity {
         m.setTextSize(20);
         m.setTextColor(Color.parseColor("#9a9aa4"));
         m.setGravity(Gravity.CENTER);
-        m.setAlpha(0.45f);
+        m.setAlpha(0.5f);
         m.setOnClickListener(v -> showMenu());
         FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(dp(44), dp(44));
         lp.gravity = Gravity.TOP | Gravity.END;
-        ((FrameLayout) stage).addView(m, lp);
+        stage.addView(m, lp);
     }
 
     void showMenu() {
-        String[] items = { "Reload", "Server address", "Check for updates", "Version" };
+        String[] items = { "Reload", "Server address", "Test connection", "Check for updates", "Diagnostics" };
         new AlertDialog.Builder(this)
                 .setItems(items, (d, i) -> {
                     if (i == 0) load();
                     else if (i == 1) askAddress();
-                    else if (i == 2) checkUpdates(true);
-                    else versionInfo();
+                    else if (i == 2) testConnection();
+                    else if (i == 3) checkUpdates(true);
+                    else diagnostics();
                 })
                 .show();
     }
 
-    void versionInfo() {
+    void diagnostics() {
         SharedPreferences p = getSharedPreferences(PREFS, MODE_PRIVATE);
         String upd = p.getString(KEY_UPDATE, getString(R.string.update_url));
+        String msg = "Container   " + versionName() + " (code " + versionCode() + ")\n"
+                + "Android     " + Build.VERSION.RELEASE + " / API " + Build.VERSION.SDK_INT + "\n"
+                + "Device      " + Build.MANUFACTURER + " " + Build.MODEL + "\n"
+                + "Server      " + base + "\n"
+                + "Last load   " + (lastError.isEmpty() ? "ok" : lastError) + "\n"
+                + "Update from " + (upd == null || upd.isEmpty() ? "not set" : upd);
         new AlertDialog.Builder(this)
-                .setTitle("Library " + versionName())
-                .setMessage("Container build " + versionCode() + "\nServer " + base
-                        + "\n\nUpdate source:\n" + (upd == null || upd.isEmpty() ? "not set" : upd)
-                        + "\n\nThe player itself updates with the server - no install needed.")
-                .setPositiveButton("OK", null)
+                .setTitle("Diagnostics")
+                .setMessage(msg)
+                .setPositiveButton("Copy", (d, w) -> {
+                    android.content.ClipboardManager cm = (android.content.ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
+                    cm.setPrimaryClip(android.content.ClipData.newPlainText("diagnostics", msg));
+                    toast("Copied");
+                })
+                .setNegativeButton("Close", null)
                 .setNeutralButton("Update source", (d, w) -> askUpdateUrl())
                 .show();
     }
@@ -223,7 +336,7 @@ public class MainActivity extends Activity {
         e.setText(getSharedPreferences(PREFS, MODE_PRIVATE).getString(KEY_UPDATE, getString(R.string.update_url)));
         new AlertDialog.Builder(this)
                 .setTitle("Update source")
-                .setMessage("URL of latest.json in your repository, e.g.\nhttps://raw.githubusercontent.com/USER/REPO/main/latest.json")
+                .setMessage("URL of latest.json in the repository, e.g.\nhttps://raw.githubusercontent.com/USER/REPO/main/latest.json")
                 .setView(e)
                 .setPositiveButton("Save", (d, w) -> getSharedPreferences(PREFS, MODE_PRIVATE)
                         .edit().putString(KEY_UPDATE, e.getText().toString().trim()).apply())
@@ -236,48 +349,36 @@ public class MainActivity extends Activity {
     void checkUpdates(boolean loud) {
         String url = getSharedPreferences(PREFS, MODE_PRIVATE).getString(KEY_UPDATE, getString(R.string.update_url));
         if (url == null || url.isEmpty()) {
-            if (loud) toast("No update source set - see Version > Update source.");
+            if (loud) toast("No update source set - Diagnostics > Update source.");
             return;
         }
         if (loud) toast("Checking\u2026");
-        Updater.check(url, new Updater.OnCheck() {
-            @Override public void done(Updater.Rel rel, String error) {
-                runOnUiThread(() -> {
-                    if (error != null) { if (loud) toast("Check failed: " + error); return; }
-                    if (rel == null) { if (loud) toast("You are on the newest build."); return; }
-                    if (rel.code <= versionCode()) {
-                        getSharedPreferences(PREFS, MODE_PRIVATE).edit().putInt(KEY_SEEN, rel.code).apply();
-                        if (loud) toast("You are on the newest build (" + versionName() + ").");
-                        return;
-                    }
-                    pendingUpdate = rel;
-                    banner.setText("Update " + rel.name + " is ready - tap to install");
-                    banner.setVisibility(View.VISIBLE);
-                    if (loud) toast("Update " + rel.name + " available");
-                });
-            }
-        });
+        Updater.check(url, (rel, error) -> runOnUiThread(() -> {
+            if (error != null) { if (loud) toast("Check failed: " + error); return; }
+            if (rel == null) { if (loud) toast("No version published yet."); return; }
+            if (rel.code <= versionCode()) { if (loud) toast("Newest build installed (" + versionName() + ")."); return; }
+            pendingUpdate = rel;
+            banner.setText("Update " + rel.name + " is ready - tap to install");
+            banner.setVisibility(View.VISIBLE);
+            if (loud) toast("Update " + rel.name + " available");
+        }));
     }
 
     void install(Updater.Rel rel) {
         if (rel == null) return;
         banner.setText("Downloading " + rel.name + "\u2026");
-        Updater.download(this, rel, new Updater.OnDownload() {
-            @Override public void done(Uri apk, String error) {
-                runOnUiThread(() -> {
-                    if (error != null) { banner.setText("Download failed: " + error); return; }
-                    banner.setVisibility(View.GONE);
-                    try {
-                        Intent i = new Intent(Intent.ACTION_VIEW);
-                        i.setDataAndType(apk, "application/vnd.android.package-archive");
-                        i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_ACTIVITY_NEW_TASK);
-                        startActivity(i);
-                    } catch (Exception e) {
-                        toast("Can't open the installer: " + e.getMessage());
-                    }
-                });
+        Updater.download(this, rel, (apk, error) -> runOnUiThread(() -> {
+            if (error != null) { banner.setText("Download failed: " + error); return; }
+            banner.setVisibility(View.GONE);
+            try {
+                Intent i = new Intent(Intent.ACTION_VIEW);
+                i.setDataAndType(apk, "application/vnd.android.package-archive");
+                i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_ACTIVITY_NEW_TASK);
+                startActivity(i);
+            } catch (Exception e) {
+                toast("Can't open the installer: " + e.getMessage());
             }
-        });
+        }));
     }
 
     // ---- plumbing -----------------------------------------------------------
@@ -288,6 +389,12 @@ public class MainActivity extends Activity {
         checkUpdates(false);
     }
 
+    @Override
+    protected void onPause() {
+        super.onPause();
+        ui.removeCallbacksAndMessages(null);
+    }
+
     void runJs(String js) {
         if (web != null) runOnUiThread(() -> web.evaluateJavascript(js, null));
     }
@@ -296,13 +403,6 @@ public class MainActivity extends Activity {
     public void onBackPressed() {
         if (web != null && web.canGoBack()) { web.goBack(); return; }
         moveTaskToBack(true);
-    }
-
-    @Override
-    protected void onDestroy() {
-        PlaybackService.onToggle = null;
-        PlaybackService.onNext = null;
-        super.onDestroy();
     }
 
     void askNotifications() {

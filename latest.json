@@ -1,7 +1,7 @@
 {
-    "versionCode":  5,
-    "versionName":  "1.4",
+    "versionCode":  6,
+    "versionName":  "1.5",
     "apk":  "Library.apk",
-    "notes":  "asks both hosts, keeps the higher build",
-    "built":  "2026-11-15 13:10"
+    "notes":  "load status, timeout, connection test, v1+v2+v3 signing",
+    "built":  "2026-11-15 13:18"
 }
