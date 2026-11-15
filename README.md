@@ -43,6 +43,29 @@ It rebuilds, copies `Library.apk` and `latest.json` here, commits and pushes.
 Nothing else in the repository needs to change — the phone sees the new
 `versionCode` on its next launch.
 
+## Huawei / Honor: "this app has not passed the security check"
+
+That message comes from Huawei's own distribution check, not from the APK. Any
+app installed outside AppGallery is shown as unverified, and **Pure Mode** (纯净模式)
+refuses the install outright with no "continue" option. Nothing in the APK can
+change that verdict — the two honest ways through are:
+
+- turn Pure Mode off yourself (Settings → System & updates → Pure Mode), then install
+  and accept the warning once; or
+- install it through a file manager after allowing "install unknown apps" for it.
+
+The signature is APK Signature Scheme v3, which is what Android 9+ uses; adding v1
+or v2 would not alter Huawei's verdict.
+
+## When it opens on a black screen
+
+It no longer can, silently. The bar under the title reports the load: *Connecting
+to …*, then *Loaded in 320 ms*, or the reason it failed — a network error, an HTTP
+status, or *no answer in 8 s*. The failure screen offers **Try again**, **Test
+connection** (says whether anything answered at all) and **Change address**.
+**⋯ → Diagnostics** shows versions, device, the last load error and the last crash
+with a Copy button.
+
 ## What it cannot do
 
 Lock-screen controls as a native media session are not here: a WebView does not
